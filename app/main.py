@@ -15,18 +15,37 @@ from .converter import (
     is_absolute_target,
     to_decimal_str,
 )
+from .custom_units import CustomUnitDef, UnitContext, build_unit_context
 from .errors import ConversionError, affine_mixing
 from .evaluator import evaluate, make_quantity
-from .parser import ParsedExpression, canonical, canonical_dim, parse_expression
+from .parser import ParsedExpression, canonical, canonical_dim
 from .schemas import (
     ConvertRequest,
     ConvertResponse,
+    CustomUnitDefItem,
     ErrorResponse,
     EvaluateRequest,
     SolveRequest,
 )
 from .solver import solve
 from .units import ALIASES, PREFIXES, REGISTRY
+
+
+def _unit_context(items: list[CustomUnitDefItem] | None) -> UnitContext:
+    """把请求中的自定义单位定义构建为请求级解析上下文（构造时即完成全量校验）。"""
+    if not items:
+        return build_unit_context([])
+    return build_unit_context(
+        [
+            CustomUnitDef(
+                symbol=item.symbol,
+                factor=Fraction(item.factor),
+                base_unit=item.base_unit,
+                index=i,
+            )
+            for i, item in enumerate(items)
+        ]
+    )
 
 app = FastAPI(
     title="量纲表达式与仿射单位换算 API",
@@ -84,8 +103,9 @@ async def validation_error_handler(_: Request, exc: RequestValidationError) -> J
     summary="单位换算",
 )
 def convert_endpoint(req: ConvertRequest) -> ConvertResponse:
-    src = parse_expression(req.from_unit)
-    dst = parse_expression(req.to_unit)
+    ctx = _unit_context(req.custom_units)
+    src = ctx.parse(req.from_unit)
+    dst = ctx.parse(req.to_unit)
     value = convert(req.value, src, dst)
     return ConvertResponse(
         value=value,
@@ -101,13 +121,14 @@ def convert_endpoint(req: ConvertRequest) -> ConvertResponse:
     summary="带单位的变量公式求值并换算到目标单位",
 )
 def evaluate_endpoint(req: EvaluateRequest) -> ConvertResponse:
+    ctx = _unit_context(req.custom_units)
     # 变量先解析单位并折叠为 SI 口径的精确量；未知单位在此即报 422
     quantities = {
-        name: make_quantity(var.value, parse_expression(var.unit))
+        name: make_quantity(var.value, ctx.parse(var.unit))
         for name, var in req.variables.items()
     }
     result = evaluate(req.formula, quantities)
-    dst = parse_expression(req.output_unit)
+    dst = ctx.parse(req.output_unit)
 
     if result.absolute:
         # 绝对温标变量作为公式唯一项：走仿射换算路径
@@ -137,13 +158,14 @@ def evaluate_endpoint(req: EvaluateRequest) -> ConvertResponse:
     summary="用带单位的等式反求一个未知量",
 )
 def solve_endpoint(req: SolveRequest) -> ConvertResponse:
+    ctx = _unit_context(req.custom_units)
     # 变量先解析单位并折叠为 SI 口径的精确量；未知单位在此即报 422
     quantities = {
-        name: make_quantity(var.value, parse_expression(var.unit))
+        name: make_quantity(var.value, ctx.parse(var.unit))
         for name, var in req.variables.items()
     }
     value_si, dim = solve(req.equation, req.solve_for, quantities)
-    dst = parse_expression(req.output_unit)
+    dst = ctx.parse(req.output_unit)
     if dst.affine is not None:
         raise affine_mixing(
             "求解结果只能换算到线性单位，不能换算到绝对温标（degC/degF）"

@@ -25,6 +25,10 @@ def unknown_symbol(symbol: str) -> ConversionError:
     return ConversionError("unknown_symbol", f"未知单位符号: {symbol!r}")
 
 
+def invalid_custom_unit(message: str) -> ConversionError:
+    return ConversionError("invalid_custom_unit", message)
+
+
 def unknown_variable(name: str) -> ConversionError:
     return ConversionError("unknown_variable", f"公式引用了未提供的变量: {name!r}")
 

@@ -12,6 +12,10 @@
 - 表达式中只允许出现数字 ``1``（表示无量纲）。
 - 幂指数必须为整数，且绝对值不超过 ``MAX_POWER``。
 - 仿射（绝对）温标 ``degC``/``degF`` 必须单独出现，不得参与乘除或取幂。
+
+符号解析由 ``resolver`` 调用点注入：默认使用全局注册表
+(:func:`app.units.resolve`)，请求级自定义单位表可注入自己的解析器，
+使解析过程不修改任何全局状态。
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
+from typing import Callable
 
 from .config import MAX_POWER
 from .errors import (
@@ -30,6 +35,9 @@ from .errors import (
     unknown_symbol,
 )
 from .units import BASE_SYMBOLS, DIMLESS, ResolvedUnit, resolve
+
+#: 符号解析器：把符号映射为 :class:`ResolvedUnit`，无法解析时返回 ``None``。
+Resolver = Callable[[str], "ResolvedUnit | None"]
 
 _TOKEN_RE = re.compile(
     r"""
@@ -105,7 +113,8 @@ def _from_unit(unit: ResolvedUnit) -> ParsedExpression:
 
 
 class _Parser:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, resolver: Resolver = resolve) -> None:
+        self._resolve = resolver
         self._tokens: list[tuple[str, str]] = []
         for m in _TOKEN_RE.finditer(text):
             kind = m.lastgroup or "bad"
@@ -171,7 +180,7 @@ class _Parser:
             return _DIMENSIONLESS
         if kind == "sym":
             _, text = self._next()
-            unit = resolve(text)
+            unit = self._resolve(text)
             if unit is None:
                 raise unknown_symbol(text)
             return _from_unit(unit)
@@ -199,9 +208,13 @@ class _Parser:
         return n
 
 
-def parse_expression(text: str) -> ParsedExpression:
-    """解析单位表达式；任何非法输入都抛出 :class:`ConversionError`。"""
-    return _Parser(text).parse()
+def parse_expression(text: str, resolver: Resolver = resolve) -> ParsedExpression:
+    """解析单位表达式；任何非法输入都抛出 :class:`ConversionError`。
+
+    ``resolver`` 用于把符号映射为单位（默认走全局注册表），
+    请求级自定义单位通过自定义解析器注入。
+    """
+    return _Parser(text, resolver).parse()
 
 
 # ---------------------------------------------------------------------------

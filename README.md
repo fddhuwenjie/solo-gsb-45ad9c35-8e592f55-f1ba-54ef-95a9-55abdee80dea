@@ -3,6 +3,7 @@
 基于 **Python + FastAPI + Pydantic** 的单位换算服务：解析单位表达式（乘、除、整数幂），
 规范化量纲，支持 SI 词头与摄氏/华氏/开尔文仿射温标；`/evaluate` 支持对带单位的变量
 公式做量纲感知的求值，`/solve` 支持用带单位的等式反求一个未知量。所有结果均为**精确十进制**。
+三个接口还可在请求中携带 1～6 项**请求内自定义线性单位**（`custom_units`），定义仅本次请求生效。
 
 ## 特性
 
@@ -13,7 +14,8 @@
 - **SI 词头**：`Y Z E P T G M k h da d c m u µ n p f a z y`（如 `km`、`mV`、`µm`）
 - **仿射温标**：`degC`（°C）、`degF`（°F）、`K` 互为绝对温度换算；温差单位 `dC`/`dF`/`dK` 严格隔离，**禁止温差与绝对温度混算**；公式中的绝对温标变量只能作为唯一项
 - **精确十进制**：内部使用有理数精确运算；结果不能表示为有限十进制或超过精度上限时返回 422，绝不输出舍入值
-- **统一 422**：维度不兼容、未知变量/符号、非法幂、除零、非法仿射用法、非线性方程、零系数、精度溢出均返回 422 且不产出结果
+- **请求内自定义线性单位**：三个接口均可携带 `custom_units`（1～6 项），`1 symbol = factor 个 base_unit`；支持链式/前向引用，源、目标与变量单位按同一组定义解析，结果保留自定义符号；定义只在本次请求生效（并发互不影响、不改全局表）
+- **统一 422**：维度不兼容、未知变量/符号、非法幂、除零、非法仿射用法、非线性方程、零系数、精度溢出、非法自定义单位定义均返回 422 且不产出结果
 
 ## 快速开始
 
@@ -54,6 +56,7 @@ pytest            # 运行测试
 | `value` | 十进制数/字符串 | 定值；建议用字符串传递以保证十进制精确性 |
 | `from`  | 字符串        | 源单位表达式                               |
 | `to`    | 字符串        | 目标单位表达式                             |
+| `custom_units` | 数组 | 可选，1～6 项请求内自定义线性单位（见[下文](#请求内自定义线性单位custom_units)） |
 
 成功响应 `200`：
 
@@ -98,6 +101,7 @@ curl -X POST http://localhost:8000/convert \
 | `variables`   | 对象   | 1～20 个变量映射；键为变量名，值为 `{"value", "unit"}`      |
 | `formula`     | 字符串 | 求值公式（见下文语法）                                      |
 | `output_unit` | 字符串 | 结果目标单位表达式                                          |
+| `custom_units` | 数组  | 可选，1～6 项请求内自定义线性单位（见[下文](#请求内自定义线性单位custom_units)） |
 
 变量名须以字母或下划线开头，仅含字母、数字、下划线（≤32 字符）；
 `value` 同样建议以 JSON 字符串传递以保证十进制精确性。成功响应与 `/convert` 相同。
@@ -172,6 +176,7 @@ curl -X POST http://localhost:8000/evaluate \
 | `equation`    | 字符串 | 含**恰好一个等号**的等式，两侧语法同 `/evaluate` 的公式      |
 | `solve_for`   | 字符串 | 待解未知量的名称（不得出现在 `variables` 中）                |
 | `output_unit` | 字符串 | 结果目标单位表达式，**须为线性单位**（不能是 `degC`/`degF`） |
+| `custom_units` | 数组  | 可选，1～6 项请求内自定义线性单位（见[下文](#请求内自定义线性单位custom_units)） |
 
 成功响应与 `/convert` 相同（`value`/`unit`/`dimension`）。
 
@@ -288,6 +293,102 @@ PRIMARY:= "(" expr ")" | VARIABLE | DECIMAL
 - 在 `/solve` 中：绝对温标变量不能出现在等式中；温差变量可正常参与求解；目标单位须为线性单位
 - 别名：`°C`→`degC`，`°F`→`degF`
 
+## 请求内自定义线性单位（`custom_units`）
+
+`/convert`、`/evaluate`、`/solve` 的请求体都可以携带 `custom_units`：1～6 项定义，每项为
+
+| 字段        | 类型          | 含义                                                  |
+| ----------- | ------------- | ----------------------------------------------------- |
+| `symbol`    | 字符串        | 自定义符号（字母/`µ μ Ω °` 开头，仅含字母、数字、下划线，≤32 字符） |
+| `factor`    | 十进制数/字符串 | **正**十进制比例：`1 symbol = factor 个 base_unit`（建议字符串） |
+| `base_unit` | 字符串        | 基准单位表达式：内置单位与本组自定义符号的乘除整数幂组合 |
+
+源单位、目标单位（`from`/`to`/`output_unit`）及各变量 `unit` 都按**同一组定义**解析；
+结果的 `unit` 保留自定义符号的规范表达式（不会被展开成内置单位），`dimension` 仍为 SI 基本量纲。
+
+```bash
+# /convert：定义英里并换算
+curl -X POST http://localhost:8000/convert \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "value": "60",
+    "from": "mph",
+    "to": "m/s",
+    "custom_units": [
+      {"symbol": "mi",  "factor": "1609.344", "base_unit": "m"},
+      {"symbol": "mph", "factor": 1,          "base_unit": "mi/h"}
+    ]
+  }'
+```
+
+```json
+{"value": "26.8224", "unit": "m/s", "dimension": "m/s"}
+```
+
+```bash
+# 反向换算时结果单位保留自定义符号
+{"value": "1609.344", "from": "m", "to": "mi",
+ "custom_units": [{"symbol": "mi", "factor": "1609.344", "base_unit": "m"}]}
+-> {"value": "1", "unit": "mi", "dimension": "m"}
+```
+
+```bash
+# /evaluate：变量与目标单位共享同一组定义
+curl -X POST http://localhost:8000/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "variables": {
+      "v": {"value": "60", "unit": "mi/h"},
+      "t": {"value": "2",  "unit": "h"}
+    },
+    "formula": "v*t",
+    "output_unit": "mi",
+    "custom_units": [{"symbol": "mi", "factor": "1609.344", "base_unit": "m"}]
+  }'
+```
+
+```json
+{"value": "120", "unit": "mi", "dimension": "m"}
+```
+
+```bash
+# /solve：链式/前向引用——league 引用了稍后才声明的 mi
+curl -X POST http://localhost:8000/solve \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "variables": {"d": {"value": "2", "unit": "league"}},
+    "equation": "3*x = d",
+    "solve_for": "x",
+    "output_unit": "mi",
+    "custom_units": [
+      {"symbol": "league", "factor": 3,          "base_unit": "mi"},
+      {"symbol": "mi",     "factor": "1609.344", "base_unit": "m"}
+    ]
+  }'
+```
+
+```json
+{"value": "2", "unit": "mi", "dimension": "m"}
+```
+
+**规则与限制**：
+
+- **链式/前向引用**：定义可引用同组中**稍后**才声明的符号（如上例 `league → mi`），比例沿链相乘、量纲沿链推导
+- **纯线性**：自定义单位只有线性一种（`factor` 个基准单位），不支持仿射偏移；因此 `base_unit` **不得引用 `degC`/`degF`**，也**不得引用裸 `K`**（绝对温标）
+  - 复合表达式中的 `K`（如 `J/(kg*K)`、`kg*K`）与带词头的 `K`（`mK`）是纯线性的，可以引用
+  - 温差单位 `dC`/`dF`/`dK` 是线性单位，可以作为基准（如自定义兰金度温差 `{"symbol":"dRa","factor":5,"base_unit":"dF"}`）
+- **符号冲突**：自定义符号不得与内置单位、别名（`Ω`、`°C`、`l`、`ℓ`）或任何**可由 SI 词头解析**的符号（`km`、`MHz`、`daN`、`µm` 等）重名
+- **不自动获得词头**：定义了 `foo` 之后，`kfoo`/`mfoo` 仍是未知符号，不会被当作 `k*foo`
+- **请求隔离**：定义只在本次请求内生效，不修改全局单位表；不同请求可对同名符号给出不同定义，并发请求各自独立计算
+- 以下任一情况使**整次请求**返回 422（错误码 `invalid_custom_unit`，参数形态问题为 `invalid_request`）：
+  - 重名、循环引用（含自引用）、引用未知符号、`base_unit` 表达式非法
+  - 符号与内置单位/别名/词头可解析符号冲突，或符号词形非法
+  - 引用 `degC`/`degF`/裸 `K`
+  - `factor` 非正十进制（`0`、负数、`NaN`、`Infinity`、非数字）或超过 50 位有效数字
+  - `custom_units` 超过 6 项（或为空数组——不使用时请省略该字段或传 `null`）
+- 即使源/目标/变量单位没有引用某项定义，该定义非法仍会使整次请求 422
+- 省略 `custom_units`（或传 `null`）时，三个接口的换算、量纲、仿射与精度规则及响应字段与原来完全一致
+
 ## 支持的单位
 
 - **SI 基本单位**：`m`、`g`（`kg` 由词头组合）、`s`、`A`、`K`、`mol`、`cd`
@@ -315,6 +416,7 @@ PRIMARY:= "(" expr ")" | VARIABLE | DECIMAL
 | `invalid_request`    | 请求参数校验失败（缺字段、值非法等）   |
 | `invalid_syntax`     | 表达式/公式语法错误（含隐式相乘）      |
 | `unknown_symbol`     | 未知单位符号                           |
+| `invalid_custom_unit` | 请求内自定义单位定义非法（重名/循环/未知引用/与内置或词头冲突/引用 degC、degF、裸 K/base_unit 非法） |
 | `unknown_variable`   | 公式引用了未在变量映射中提供的变量     |
 | `invalid_power`      | 非法幂（指数非无量纲整数或超出上限）   |
 | `dimension_mismatch` | 量纲不兼容（加减项或结果与目标单位）   |
@@ -334,6 +436,7 @@ app/
   evaluator.py  # 公式求值器（Fraction 数值/量纲合并、温标规则）
   solver.py     # 等式求解器（未知量一次系数/常数的 Fraction 构建与量纲校验）
   units.py      # 单位注册表、SI 词头与别名
+  custom_units.py # 请求级自定义线性单位（校验、展开与隔离）
   converter.py  # 量纲校验、仿射规则与精确十进制换算
   errors.py     # 领域错误（统一映射 422）
   config.py     # 精度/幂次上限配置
@@ -341,6 +444,7 @@ tests/
   test_api.py       # /convert 端到端测试
   test_evaluate.py  # /evaluate 端到端测试
   test_solve.py     # /solve 端到端测试
+  test_custom_units.py # custom_units（三接口）端到端测试
 Dockerfile
 docker-compose.yml
 ```

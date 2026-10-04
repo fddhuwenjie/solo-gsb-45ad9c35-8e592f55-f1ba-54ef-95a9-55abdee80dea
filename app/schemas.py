@@ -28,6 +28,48 @@ def _check_value(d: Decimal) -> Decimal:
     return d
 
 
+class CustomUnitDefItem(BaseModel):
+    """请求内自定义线性单位：``1 symbol = factor 个 base_unit``。
+
+    仅在本次请求内生效；语义校验（重名、冲突、循环、未知引用、
+    禁引用 degC/degF/裸 K）在领域层 :mod:`app.custom_units` 完成。
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    symbol: str = Field(min_length=1, max_length=32, description="自定义单位符号")
+    factor: Decimal = Field(
+        description="正十进制比例：1 symbol = factor 个 base_unit；建议以字符串传递"
+    )
+    base_unit: str = Field(
+        min_length=1,
+        max_length=200,
+        description="基准单位表达式（内置单位或本组自定义符号的乘除整数幂组合）",
+    )
+
+    @field_validator("factor", mode="before")
+    @classmethod
+    def _coerce_factor(cls, v: Any) -> Any:
+        return _coerce_value(v)
+
+    @field_validator("factor")
+    @classmethod
+    def _check_factor(cls, d: Decimal) -> Decimal:
+        _check_value(d)
+        if d <= 0:
+            raise ValueError("factor 必须是正十进制数（大于 0）")
+        return d
+
+
+def _check_custom_units(
+    items: list[CustomUnitDefItem] | None,
+) -> list[CustomUnitDefItem] | None:
+    """字段存在（非 null）时至少 1 项；省略或 null 表示不使用自定义单位。"""
+    if items is not None and len(items) == 0:
+        raise ValueError("custom_units 至少包含 1 项；不使用自定义单位时请省略该字段")
+    return items
+
+
 class ConvertRequest(BaseModel):
     """POST /convert 请求体。
 
@@ -40,6 +82,11 @@ class ConvertRequest(BaseModel):
     value: Decimal = Field(description="十进制定值")
     from_unit: str = Field(alias="from", min_length=1, max_length=200, description="源单位表达式")
     to_unit: str = Field(alias="to", min_length=1, max_length=200, description="目标单位表达式")
+    custom_units: list[CustomUnitDefItem] | None = Field(
+        default=None,
+        max_length=6,
+        description="请求内自定义线性单位（1～6 项），仅本次请求生效",
+    )
 
     @field_validator("value", mode="before")
     @classmethod
@@ -50,6 +97,13 @@ class ConvertRequest(BaseModel):
     @classmethod
     def _check_value(cls, d: Decimal) -> Decimal:
         return _check_value(d)
+
+    @field_validator("custom_units")
+    @classmethod
+    def _check_custom_units(
+        cls, items: list[CustomUnitDefItem] | None
+    ) -> list[CustomUnitDefItem] | None:
+        return _check_custom_units(items)
 
 
 class Variable(BaseModel):
@@ -82,6 +136,11 @@ class EvaluateRequest(BaseModel):
     )
     formula: str = Field(min_length=1, max_length=500, description="求值公式")
     output_unit: str = Field(min_length=1, max_length=200, description="结果目标单位表达式")
+    custom_units: list[CustomUnitDefItem] | None = Field(
+        default=None,
+        max_length=6,
+        description="请求内自定义线性单位（1～6 项），仅本次请求生效",
+    )
 
     @field_validator("variables")
     @classmethod
@@ -93,6 +152,13 @@ class EvaluateRequest(BaseModel):
                     "仅含字母、数字、下划线，长度不超过 32"
                 )
         return variables
+
+    @field_validator("custom_units")
+    @classmethod
+    def _check_custom_units(
+        cls, items: list[CustomUnitDefItem] | None
+    ) -> list[CustomUnitDefItem] | None:
+        return _check_custom_units(items)
 
 
 class SolveRequest(BaseModel):
@@ -111,6 +177,11 @@ class SolveRequest(BaseModel):
     solve_for: str = Field(min_length=1, max_length=32, description="待解未知量的名称")
     output_unit: str = Field(
         min_length=1, max_length=200, description="结果目标单位表达式（须为线性单位）"
+    )
+    custom_units: list[CustomUnitDefItem] | None = Field(
+        default=None,
+        max_length=6,
+        description="请求内自定义线性单位（1～6 项），仅本次请求生效",
     )
 
     @field_validator("variables")
@@ -140,6 +211,13 @@ class SolveRequest(BaseModel):
                 "仅含字母、数字、下划线，长度不超过 32"
             )
         return name
+
+    @field_validator("custom_units")
+    @classmethod
+    def _check_custom_units(
+        cls, items: list[CustomUnitDefItem] | None
+    ) -> list[CustomUnitDefItem] | None:
+        return _check_custom_units(items)
 
     @model_validator(mode="after")
     def _check_solve_for_not_in_variables(self) -> "SolveRequest":

@@ -15,6 +15,7 @@ from .converter import (
     is_absolute_target,
     to_decimal_str,
 )
+from .custom_units import build_scope
 from .errors import ConversionError, affine_mixing
 from .evaluator import evaluate, make_quantity
 from .parser import ParsedExpression, canonical, canonical_dim, parse_expression
@@ -84,8 +85,9 @@ async def validation_error_handler(_: Request, exc: RequestValidationError) -> J
     summary="单位换算",
 )
 def convert_endpoint(req: ConvertRequest) -> ConvertResponse:
-    src = parse_expression(req.from_unit)
-    dst = parse_expression(req.to_unit)
+    scope = build_scope(req.custom_units)
+    src = parse_expression(req.from_unit, scope)
+    dst = parse_expression(req.to_unit, scope)
     value = convert(req.value, src, dst)
     return ConvertResponse(
         value=value,
@@ -101,13 +103,14 @@ def convert_endpoint(req: ConvertRequest) -> ConvertResponse:
     summary="带单位的变量公式求值并换算到目标单位",
 )
 def evaluate_endpoint(req: EvaluateRequest) -> ConvertResponse:
+    scope = build_scope(req.custom_units)
     # 变量先解析单位并折叠为 SI 口径的精确量；未知单位在此即报 422
     quantities = {
-        name: make_quantity(var.value, parse_expression(var.unit))
+        name: make_quantity(var.value, parse_expression(var.unit, scope))
         for name, var in req.variables.items()
     }
     result = evaluate(req.formula, quantities)
-    dst = parse_expression(req.output_unit)
+    dst = parse_expression(req.output_unit, scope)
 
     if result.absolute:
         # 绝对温标变量作为公式唯一项：走仿射换算路径
@@ -137,13 +140,14 @@ def evaluate_endpoint(req: EvaluateRequest) -> ConvertResponse:
     summary="用带单位的等式反求一个未知量",
 )
 def solve_endpoint(req: SolveRequest) -> ConvertResponse:
+    scope = build_scope(req.custom_units)
     # 变量先解析单位并折叠为 SI 口径的精确量；未知单位在此即报 422
     quantities = {
-        name: make_quantity(var.value, parse_expression(var.unit))
+        name: make_quantity(var.value, parse_expression(var.unit, scope))
         for name, var in req.variables.items()
     }
     value_si, dim = solve(req.equation, req.solve_for, quantities)
-    dst = parse_expression(req.output_unit)
+    dst = parse_expression(req.output_unit, scope)
     if dst.affine is not None:
         raise affine_mixing(
             "求解结果只能换算到线性单位，不能换算到绝对温标（degC/degF）"

@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
+from typing import TYPE_CHECKING
 
 from .config import MAX_POWER
 from .errors import (
@@ -30,6 +31,9 @@ from .errors import (
     unknown_symbol,
 )
 from .units import BASE_SYMBOLS, DIMLESS, ResolvedUnit, resolve
+
+if TYPE_CHECKING:
+    from .custom_units import UnitScope
 
 _TOKEN_RE = re.compile(
     r"""
@@ -105,7 +109,8 @@ def _from_unit(unit: ResolvedUnit) -> ParsedExpression:
 
 
 class _Parser:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, scope: UnitScope | None = None) -> None:
+        self._scope = scope
         self._tokens: list[tuple[str, str]] = []
         for m in _TOKEN_RE.finditer(text):
             kind = m.lastgroup or "bad"
@@ -171,7 +176,9 @@ class _Parser:
             return _DIMENSIONLESS
         if kind == "sym":
             _, text = self._next()
-            unit = resolve(text)
+            # 存在请求级自定义单位时按该组定义解析，否则仅查全局注册表
+            resolver = self._scope.resolve_symbol if self._scope is not None else resolve
+            unit = resolver(text)
             if unit is None:
                 raise unknown_symbol(text)
             return _from_unit(unit)
@@ -199,9 +206,14 @@ class _Parser:
         return n
 
 
-def parse_expression(text: str) -> ParsedExpression:
-    """解析单位表达式；任何非法输入都抛出 :class:`ConversionError`。"""
-    return _Parser(text).parse()
+def parse_expression(text: str, scope: UnitScope | None = None) -> ParsedExpression:
+    """解析单位表达式；任何非法输入都抛出 :class:`ConversionError`。
+
+    ``scope`` 为请求级自定义单位上下文（见 :mod:`app.custom_units`）；
+    缺省时仅按全局注册表解析，行为与无 ``custom_units`` 的请求完全一致。
+    """
+
+    return _Parser(text, scope).parse()
 
 
 # ---------------------------------------------------------------------------

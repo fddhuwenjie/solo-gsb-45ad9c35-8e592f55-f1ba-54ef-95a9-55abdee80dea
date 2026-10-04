@@ -28,6 +28,37 @@ def _check_value(d: Decimal) -> Decimal:
     return d
 
 
+class CustomUnitItem(BaseModel):
+    """请求级自定义线性单位声明：``1 symbol = factor 个 base_unit``。"""
+
+    symbol: str = Field(min_length=1, max_length=32, description="自定义单位符号")
+    factor: Decimal = Field(
+        gt=0, description="正十进制比例：1 symbol = factor 个 base_unit"
+    )
+    base_unit: str = Field(
+        min_length=1,
+        max_length=200,
+        description="基准单位表达式（可引用本次声明的其他自定义单位；"
+        "不得引用 degC、degF 或裸 K）",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("factor", mode="before")
+    @classmethod
+    def _coerce_factor(cls, v: Any) -> Any:
+        return _coerce_value(v)
+
+    @field_validator("factor")
+    @classmethod
+    def _check_factor(cls, d: Decimal) -> Decimal:
+        return _check_value(d)
+
+
+#: 三个换算接口均可携带的请求级自定义单位声明（1～6 项）。
+CustomUnits = list[CustomUnitItem]
+
+
 class ConvertRequest(BaseModel):
     """POST /convert 请求体。
 
@@ -40,6 +71,12 @@ class ConvertRequest(BaseModel):
     value: Decimal = Field(description="十进制定值")
     from_unit: str = Field(alias="from", min_length=1, max_length=200, description="源单位表达式")
     to_unit: str = Field(alias="to", min_length=1, max_length=200, description="目标单位表达式")
+    custom_units: CustomUnits | None = Field(
+        default=None,
+        min_length=1,
+        max_length=6,
+        description="请求级自定义线性单位声明（1～6 项），仅在本次请求内有效",
+    )
 
     @field_validator("value", mode="before")
     @classmethod
@@ -82,6 +119,12 @@ class EvaluateRequest(BaseModel):
     )
     formula: str = Field(min_length=1, max_length=500, description="求值公式")
     output_unit: str = Field(min_length=1, max_length=200, description="结果目标单位表达式")
+    custom_units: CustomUnits | None = Field(
+        default=None,
+        min_length=1,
+        max_length=6,
+        description="请求级自定义线性单位声明（1～6 项），仅在本次请求内有效",
+    )
 
     @field_validator("variables")
     @classmethod
@@ -111,6 +154,12 @@ class SolveRequest(BaseModel):
     solve_for: str = Field(min_length=1, max_length=32, description="待解未知量的名称")
     output_unit: str = Field(
         min_length=1, max_length=200, description="结果目标单位表达式（须为线性单位）"
+    )
+    custom_units: CustomUnits | None = Field(
+        default=None,
+        min_length=1,
+        max_length=6,
+        description="请求级自定义线性单位声明（1～6 项），仅在本次请求内有效",
     )
 
     @field_validator("variables")

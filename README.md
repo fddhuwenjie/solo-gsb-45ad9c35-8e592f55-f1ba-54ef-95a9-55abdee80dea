@@ -13,6 +13,7 @@
 - **SI 词头**：`Y Z E P T G M k h da d c m u µ n p f a z y`（如 `km`、`mV`、`µm`）
 - **仿射温标**：`degC`（°C）、`degF`（°F）、`K` 互为绝对温度换算；温差单位 `dC`/`dF`/`dK` 严格隔离，**禁止温差与绝对温度混算**；公式中的绝对温标变量只能作为唯一项
 - **精确十进制**：内部使用有理数精确运算；结果不能表示为有限十进制或超过精度上限时返回 422，绝不输出舍入值
+- **请求级自定义单位**：三个接口均可携带 1～6 项 `custom_units`（`symbol`/正十进制 `factor`/`base_unit`，含义为 `1 symbol = factor 个 base_unit`），支持前向引用与链式定义；自定义符号不与内置单位/词头冲突、不自动获得词头、不能引用 `degC`/`degF`/裸 `K`，且仅在本次请求内有效（不修改全局单位表，并发安全）
 - **统一 422**：维度不兼容、未知变量/符号、非法幂、除零、非法仿射用法、非线性方程、零系数、精度溢出均返回 422 且不产出结果
 
 ## 快速开始
@@ -54,6 +55,7 @@ pytest            # 运行测试
 | `value` | 十进制数/字符串 | 定值；建议用字符串传递以保证十进制精确性 |
 | `from`  | 字符串        | 源单位表达式                               |
 | `to`    | 字符串        | 目标单位表达式                             |
+| `custom_units` | 数组（可省略） | 1～6 项请求级自定义单位声明，详见下文 |
 
 成功响应 `200`：
 
@@ -87,6 +89,88 @@ curl -X POST http://localhost:8000/convert \
 {"value": "1",    "from": "s^-2*kg*m","to": "N"}        -> {"value": "1",     "unit": "N",    "dimension": "kg*m/s^2"}
 ```
 
+### 请求级自定义单位（三个接口通用）
+
+请求体可携带 `custom_units`，每项为 `{"symbol", "factor", "base_unit"}`，
+含义为 **1 symbol = factor 个 base_unit**（`factor` 为正十进制数，建议用字符串传递）。
+源、目标及变量单位都按**同一组定义**解析；允许在定义中前向引用本次尚未声明完的符号，
+成功响应的 `unit` 保留自定义符号的规范表达式，`dimension` 仍为 SI 基本量纲。
+
+```bash
+curl -X POST http://localhost:8000/convert \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "value": "10",
+    "from": "ft",
+    "to": "m",
+    "custom_units": [{"symbol": "ft", "factor": "0.3048", "base_unit": "m"}]
+  }'
+```
+
+```json
+{"value": "3.048", "unit": "m", "dimension": "m"}
+```
+
+链式定义（`furlong` 引用后声明的 `chain`，声明顺序无关）：
+
+```bash
+# 2 furlong = 2 * 10 chain = 20 * 22 m = 440 m
+{"value": "2", "from": "furlong", "to": "m",
+ "custom_units": [
+   {"symbol": "furlong", "factor": "10",  "base_unit": "chain"},
+   {"symbol": "chain",   "factor": "22",  "base_unit": "m"}
+ ]}
+-> {"value": "440", "unit": "m", "dimension": "m"}
+
+# 自定义单位之间也可以互相换算
+{"value": "1", "from": "mile", "to": "ft",
+ "custom_units": [
+   {"symbol": "mile", "factor": "1609.344", "base_unit": "m"},
+   {"symbol": "ft",   "factor": "0.3048",   "base_unit": "m"}
+ ]}
+-> {"value": "5280", "unit": "ft", "dimension": "m"}
+
+# 结果单位保留自定义符号的规范表达式（正指数排序，负指数以 / 连接）
+{"value": "1", "from": "N*bar", "to": "kg*bar*m/s^2",
+ "custom_units": [{"symbol": "bar", "factor": "100000", "base_unit": "Pa"}]}
+-> {"value": "1", "unit": "bar*kg*m/s^2", "dimension": "kg^2/s^4"}
+```
+
+`/evaluate` 与 `/solve` 的用法相同——变量单位与 `output_unit` 也在该组定义下解析：
+
+```bash
+# /evaluate：以“打”为计数单位（无量纲自定义单位）
+{"variables":{"a":{"value":"2","unit":"dozen"},"b":{"value":"3","unit":"dozen"}},
+ "formula":"a*b","output_unit":"dozen^2",
+ "custom_units":[{"symbol":"dozen","factor":"12","base_unit":"1"}]}
+-> {"value":"6","unit":"dozen^2","dimension":"1"}
+
+# /solve：x rod -> m
+{"variables":{"a":{"value":"3","unit":"rod"}},
+ "equation":"x = a","solve_for":"x","output_unit":"m",
+ "custom_units":[{"symbol":"rod","factor":"5.0292","base_unit":"m"}]}
+-> {"value":"15.0876","unit":"m","dimension":"m"}
+
+# 温度维度只能走线性基准（带词头的 K 或 dC/dF/dK），自定义单位本身是线性的
+{"value":"3","from":"mdeg","to":"mK",
+ "custom_units":[{"symbol":"mdeg","factor":"2","base_unit":"mK"}]}
+-> {"value":"6","unit":"mK","dimension":"K"}
+```
+
+**自定义单位规则**：
+
+- 数量为 1～6 项；同一请求内 `symbol` 不得重名；不同请求可对同名符号给出不同定义，
+  并发请求也各按本次定义计算，**不会修改全局单位表**；省略 `custom_units` 时一切照旧
+- `symbol` 须以字母开头、仅含字母/数字/下划线（≤ 32 字符）；不得与内置单位、别名或
+  **任何可由 SI 词头解析的符号**冲突：`m`、`kg`、`km`、`MHz`、`mL`、`l`、`°C` 等均不可声明；
+  纯词头字面量 `k`、`da` 解析不出单位，可以声明
+- 自定义符号**不自动获得词头**：声明了 `foo` 后 `kfoo` 仍是未知符号
+- `base_unit` 为单位表达式，可引用本次声明的其他自定义符号（允许前向引用与任意长度的链），
+  但**不得引用 `degC`、`degF` 或裸 `K`**（包括 `1/K`、`kg*degC` 等组合）；
+  温度维度请使用 `dC`/`dF`/`dK` 或带词头的 `K`（如 `mK`），此时自定义单位是纯线性的
+- 重名、循环引用（含自引用）、未知引用、非法比例（非正数/非有限十进制/超过 50 位有效数字）、
+  非法符号或禁引温标均使**整次请求返回 422**——即使该符号没有被源/目标表达式实际使用
+
 ### `POST /evaluate`
 
 对带单位的变量映射与公式求值，并把结果**精确换算**到 `output_unit`。
@@ -98,6 +182,7 @@ curl -X POST http://localhost:8000/convert \
 | `variables`   | 对象   | 1～20 个变量映射；键为变量名，值为 `{"value", "unit"}`      |
 | `formula`     | 字符串 | 求值公式（见下文语法）                                      |
 | `output_unit` | 字符串 | 结果目标单位表达式                                          |
+| `custom_units`| 数组（可省略） | 1～6 项请求级自定义单位声明，详见上文                |
 
 变量名须以字母或下划线开头，仅含字母、数字、下划线（≤32 字符）；
 `value` 同样建议以 JSON 字符串传递以保证十进制精确性。成功响应与 `/convert` 相同。
@@ -172,6 +257,7 @@ curl -X POST http://localhost:8000/evaluate \
 | `equation`    | 字符串 | 含**恰好一个等号**的等式，两侧语法同 `/evaluate` 的公式      |
 | `solve_for`   | 字符串 | 待解未知量的名称（不得出现在 `variables` 中）                |
 | `output_unit` | 字符串 | 结果目标单位表达式，**须为线性单位**（不能是 `degC`/`degF`） |
+| `custom_units`| 数组（可省略） | 1～6 项请求级自定义单位声明，详见上文                |
 
 成功响应与 `/convert` 相同（`value`/`unit`/`dimension`）。
 
@@ -312,9 +398,9 @@ PRIMARY:= "(" expr ")" | VARIABLE | DECIMAL
 
 | 错误码               | 含义                                   |
 | -------------------- | -------------------------------------- |
-| `invalid_request`    | 请求参数校验失败（缺字段、值非法等）   |
+| `invalid_request`    | 请求参数校验失败（缺字段、值非法等；自定义单位的重名/符号冲突/循环引用/非法比例/禁引温标也归入此码）   |
 | `invalid_syntax`     | 表达式/公式语法错误（含隐式相乘）      |
-| `unknown_symbol`     | 未知单位符号                           |
+| `unknown_symbol`     | 未知单位符号（含自定义单位的 `base_unit` 引用了未声明符号） |
 | `unknown_variable`   | 公式引用了未在变量映射中提供的变量     |
 | `invalid_power`      | 非法幂（指数非无量纲整数或超出上限）   |
 | `dimension_mismatch` | 量纲不兼容（加减项或结果与目标单位）   |
@@ -334,6 +420,7 @@ app/
   evaluator.py  # 公式求值器（Fraction 数值/量纲合并、温标规则）
   solver.py     # 等式求解器（未知量一次系数/常数的 Fraction 构建与量纲校验）
   units.py      # 单位注册表、SI 词头与别名
+  custom_units.py  # 请求级自定义单位（custom_units）：冲突/循环/禁引校验与链式解析
   converter.py  # 量纲校验、仿射规则与精确十进制换算
   errors.py     # 领域错误（统一映射 422）
   config.py     # 精度/幂次上限配置
@@ -341,6 +428,7 @@ tests/
   test_api.py       # /convert 端到端测试
   test_evaluate.py  # /evaluate 端到端测试
   test_solve.py     # /solve 端到端测试
+  test_custom_units.py  # 请求级自定义单位（三个接口）端到端测试
 Dockerfile
 docker-compose.yml
 ```
